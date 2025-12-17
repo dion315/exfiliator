@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Purple-team port/protocol test client.
+Purple-team port/protocol test client with PSK auth.
 
-- Tests TCP: connect, send N bytes, read JSON summary
-- Tests UDP: handshake + send datagrams with seq, wait for ACKs, report loss
-- Tests HTTP: POST synthetic bytes to /upload
+- Tests TCP: connect, send N bytes, read JSON summary (PSK in JSON header)
+- Tests UDP: handshake + send datagrams with seq, wait for ACKs (PSK in HELLO JSON)
+- Tests HTTP: POST synthetic bytes to /upload (PSK in X-PSK header)
 
 Requires an explicit allowlist of targets/ports in a JSON config file.
 """
@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import os
 import socket
 import struct
@@ -21,14 +20,6 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-
-
-log = logging.getLogger("pt_client")
-
-
-def setup_logging(verbosity: int) -> None:
-    level = logging.INFO if verbosity == 0 else logging.DEBUG
-    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(message)s")
 
 
 def rand_bytes(n: int) -> bytes:
@@ -63,13 +54,14 @@ def load_config(path: str) -> Dict[str, Any]:
         return json.load(f)
 
 
-def tcp_test(t: TcpTest, test_id: str, timeout_s: float) -> Dict[str, Any]:
+def tcp_test(t: TcpTest, test_id: str, timeout_s: float, psk: str) -> Dict[str, Any]:
     payload = rand_bytes(t.bytes)
-    meta = {"test_id": test_id, "bytes": t.bytes}
+    meta = {"test_id": test_id, "bytes": t.bytes, "psk": psk}
     header = (json.dumps(meta) + "\n").encode("utf-8")
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout_s)
+
     t0 = time.time()
     s.connect((t.host, t.port))
     s.sendall(header)
@@ -88,7 +80,8 @@ def tcp_test(t: TcpTest, test_id: str, timeout_s: float) -> Dict[str, Any]:
 
     elapsed = max(1e-6, time.time() - t0)
     sent_mbps = (t.bytes * 8) / elapsed / 1_000_000
-    resp = {}
+
+    resp: Dict[str, Any]
     try:
         resp = json.loads(buf.decode("utf-8").strip())
     except Exception:
@@ -105,21 +98,21 @@ def tcp_test(t: TcpTest, test_id: str, timeout_s: float) -> Dict[str, Any]:
     }
 
 
-def udp_test(u: UdpTest, test_id: str, timeout_s: float) -> Dict[str, Any]:
+def udp_test(u: UdpTest, test_id: str, timeout_s: float, psk: str) -> Dict[str, Any]:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(timeout_s)
 
     addr = (u.host, u.port)
 
-    # HELLO handshake
-    hello = b"HELLO " + json.dumps({"test_id": test_id}).encode("utf-8")
+    # HELLO handshake (with PSK)
+    hello = b"HELLO " + json.dumps({"test_id": test_id, "psk": psk}).encode("utf-8")
     sock.sendto(hello, addr)
     try:
         _ = sock.recvfrom(2048)
     except Exception:
-        pass  # not strictly required; some networks drop replies
+        # Some networks drop replies; continue with test anyway
+        pass
 
-    # Send packets
     seq_fmt = "!Q"  # uint64
     payload = rand_bytes(max(0, u.payload_size))
     sent = 0
@@ -136,7 +129,7 @@ def udp_test(u: UdpTest, test_id: str, timeout_s: float) -> Dict[str, Any]:
         sent += 1
         time.sleep(max(0.0, u.inter_packet_ms / 1000.0))
 
-        # Drain acks opportunistically
+        # Drain ACKs opportunistically
         drain_until = time.time() + (u.ack_timeout_ms / 1000.0)
         while time.time() < drain_until:
             try:
@@ -170,7 +163,7 @@ def udp_test(u: UdpTest, test_id: str, timeout_s: float) -> Dict[str, Any]:
 
     sock.close()
 
-    loss = 0 if sent == 0 else (sent - acked) / sent
+    loss = 0.0 if sent == 0 else (sent - acked) / sent
     return {
         "type": "udp",
         "host": u.host,
@@ -184,7 +177,7 @@ def udp_test(u: UdpTest, test_id: str, timeout_s: float) -> Dict[str, Any]:
     }
 
 
-def http_test(h: HttpTest, test_id: str, timeout_s: float) -> Dict[str, Any]:
+def http_test(h: HttpTest, test_id: str, timeout_s: float, psk: str) -> Dict[str, Any]:
     payload = rand_bytes(h.bytes)
     req = urllib.request.Request(
         h.url,
@@ -193,15 +186,18 @@ def http_test(h: HttpTest, test_id: str, timeout_s: float) -> Dict[str, Any]:
         headers={
             "Content-Type": "application/octet-stream",
             "X-Test-Id": test_id,
+            "X-PSK": psk,
         },
     )
     t0 = time.time()
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         body = resp.read()
         status = resp.status
+
     elapsed = max(1e-6, time.time() - t0)
     mbps = (h.bytes * 8) / elapsed / 1_000_000
-    server = {}
+
+    server: Dict[str, Any]
     try:
         server = json.loads(body.decode("utf-8"))
     except Exception:
@@ -223,23 +219,28 @@ def main():
     ap.add_argument("--config", required=True, help="JSON config path (explicit allowlist)")
     ap.add_argument("--timeout", type=float, default=10.0, help="Socket/HTTP timeout seconds")
     ap.add_argument("--test-id", default=None, help="Optional test id (otherwise timestamp-based)")
-    ap.add_argument("-v", "--verbose", action="count", default=0)
-    args = ap.parse_args()
 
-    setup_logging(args.verbose)
+    ap.add_argument("--psk", default=None, help="Pre-shared key (prefer --psk-file)")
+    ap.add_argument("--psk-file", default=None, help="Read PSK from file")
+
+    args = ap.parse_args()
 
     cfg = load_config(args.config)
     test_id = args.test_id or f"pt-{int(time.time())}"
 
+    psk = args.psk
+    if args.psk_file:
+        with open(args.psk_file, "r", encoding="utf-8") as f:
+            psk = f.read().strip()
+    if not psk:
+        raise SystemExit("PSK required. Use --psk-file or --psk.")
+
     results: List[Dict[str, Any]] = []
 
-    # TCP tests
     for item in cfg.get("tcp", []):
         t = TcpTest(host=item["host"], port=int(item["port"]), bytes=int(item["bytes"]))
-        log.info("TCP test %s:%d bytes=%d", t.host, t.port, t.bytes)
-        results.append(tcp_test(t, test_id, args.timeout))
+        results.append(tcp_test(t, test_id, args.timeout, psk))
 
-    # UDP tests
     for item in cfg.get("udp", []):
         u = UdpTest(
             host=item["host"],
@@ -249,14 +250,11 @@ def main():
             inter_packet_ms=int(item.get("inter_packet_ms", 5)),
             ack_timeout_ms=int(item.get("ack_timeout_ms", 50)),
         )
-        log.info("UDP test %s:%d payload=%d packets=%d", u.host, u.port, u.payload_size, u.packets)
-        results.append(udp_test(u, test_id, args.timeout))
+        results.append(udp_test(u, test_id, args.timeout, psk))
 
-    # HTTP tests
     for item in cfg.get("http", []):
         h = HttpTest(url=item["url"], bytes=int(item["bytes"]))
-        log.info("HTTP test %s bytes=%d", h.url, h.bytes)
-        results.append(http_test(h, test_id, args.timeout))
+        results.append(http_test(h, test_id, args.timeout, psk))
 
     out = {"test_id": test_id, "results": results}
     print(json.dumps(out, indent=2))
