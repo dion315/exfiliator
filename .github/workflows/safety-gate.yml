@@ -1,0 +1,53 @@
+name: Safety Gate
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  push:
+    branches: [ "main" ]
+
+jobs:
+  safety_gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Safety scan for risky patterns
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Scanning for disallowed patterns (conservative)..."
+          DISALLOWED=(
+            "icmp"
+            "dns[[:space:]]*tunn"
+            "tunnel"
+            "covert"
+            "stegan"
+            "keylog"
+            "screenshot"
+            "clipboard"
+            "exfiltrat"
+            "pycryptodome"
+            "cryptography"
+            "scapy"
+          )
+
+          TARGETS=( "exfiliator_client.py" "exfiliator_server.py" "docs/" "queries/" "README.md" "CONTRIBUTING.md" )
+
+          FOUND=0
+          for pat in "${DISALLOWED[@]}"; do
+            if grep -RIn --exclude-dir .git --exclude-dir .venv --exclude-dir venv --exclude-dir __pycache__ \
+              -E -i "$pat" "${TARGETS[@]}" 2>/dev/null; then
+              echo "::error::Found disallowed pattern: $pat"
+              FOUND=1
+            fi
+          done
+
+          if [ "$FOUND" -eq 1 ]; then
+            echo "Safety Gate failed. Remove risky patterns or document exception with security review."
+            exit 1
+          fi
+
+          echo "Safety Gate passed."

@@ -1,0 +1,80 @@
+// ======================================================
+// Exfiliator - Defender Advanced Hunting (paste-ready)
+// ======================================================
+
+// ---------- PARAMETERS ----------
+let StartTime = ago(24h);
+let EndTime = now();
+let Device = "REPLACE_DEVICE_NAME";                 // e.g., "WS-1234"
+let TestPorts = dynamic([5001, 5002, 8080, 8443]);  // match your config
+let Procs = dynamic(["python.exe","pythonw.exe"]);
+
+// ---------- 1) Python network activity (baseline) ----------
+DeviceNetworkEvents
+| where Timestamp between (StartTime .. EndTime)
+| where DeviceName =~ Device
+| where InitiatingProcessFileName in~ (Procs)
+| project Timestamp, DeviceName, ActionType, Protocol, RemoteIP, RemotePort, RemoteUrl,
+          InitiatingProcessAccountName, InitiatingProcessCommandLine,
+          InitiatingProcessParentFileName, InitiatingProcessIntegrityLevel
+| order by Timestamp desc;
+
+// ---------- 2) Focus on your test ports ----------
+DeviceNetworkEvents
+| where Timestamp between (StartTime .. EndTime)
+| where DeviceName =~ Device
+| where RemotePort in (TestPorts)
+| where InitiatingProcessFileName in~ (Procs)
+| summarize Count=count(),
+            FirstSeen=min(Timestamp),
+            LastSeen=max(Timestamp),
+            SampleCmd=any(InitiatingProcessCommandLine),
+            SampleAction=any(ActionType)
+  by Protocol, RemoteIP, RemotePort, InitiatingProcessFileName
+| order by LastSeen desc;
+
+// ---------- 3) Outcome-ish view (ActionType varies by tenant) ----------
+DeviceNetworkEvents
+| where Timestamp between (StartTime .. EndTime)
+| where DeviceName =~ Device
+| where InitiatingProcessFileName in~ (Procs)
+| where RemotePort in (TestPorts)
+| extend Outcome =
+    case(
+      ActionType has_any ("ConnectionSuccess","ConnectionAccepted"), "LikelyAllowed",
+      ActionType has_any ("ConnectionFailed","ConnectionBlocked"), "LikelyBlockedOrFailed",
+      "Unknown"
+    )
+| summarize Events=count(), FirstSeen=min(Timestamp), LastSeen=max(Timestamp)
+  by Outcome, Protocol, RemoteIP, RemotePort, ActionType
+| order by LastSeen desc;
+
+// ---------- 4) Process tree context around python ----------
+let Net = DeviceNetworkEvents
+| where Timestamp between (StartTime .. EndTime)
+| where DeviceName =~ Device
+| where InitiatingProcessFileName in~ (Procs)
+| where RemotePort in (TestPorts)
+| project DeviceId, Timestamp, Protocol, RemoteIP, RemotePort, ActionType,
+          InitiatingProcessFileName, InitiatingProcessCommandLine, InitiatingProcessParentFileName;
+
+let Proc = DeviceProcessEvents
+| where Timestamp between (StartTime .. EndTime)
+| where DeviceName =~ Device
+| project DeviceId, ProcTime=Timestamp, FileName, CommandLine, ParentFileName, ProcessId, ParentProcessId;
+
+Net
+| join kind=leftouter Proc on DeviceId
+| project Timestamp, Protocol, RemoteIP, RemotePort, ActionType,
+          InitiatingProcessFileName, InitiatingProcessCommandLine,
+          ParentFileName, CommandLine
+| order by Timestamp desc;
+
+// ---------- 5) HTTP visibility (RemoteUrl may be empty depending on telemetry) ----------
+DeviceNetworkEvents
+| where Timestamp between (StartTime .. EndTime)
+| where DeviceName =~ Device
+| where InitiatingProcessFileName in~ (Procs)
+| where RemotePort in (dynamic([80, 8080, 443, 8443]))
+| project Timestamp, Protocol, RemoteIP, RemotePort, RemoteUrl, ActionType, InitiatingProcessCommandLine
+| order by Timestamp desc;

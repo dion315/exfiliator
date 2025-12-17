@@ -1,0 +1,69 @@
+// ======================================================
+// Exfiliator - Microsoft Sentinel (paste-ready)
+// ======================================================
+
+// ---------- PARAMETERS ----------
+let StartTime = ago(24h);
+let EndTime = now();
+let Device = "REPLACE_DEVICE_NAME";
+let TestPorts = dynamic([5001, 5002, 8080, 8443]);
+let Procs = dynamic(["python.exe","pythonw.exe"]);
+
+// ======================================================
+// A) If MDE Advanced Hunting tables are present in Sentinel
+// (table names vary by connector/solution; union isfuzzy helps)
+// ======================================================
+
+union isfuzzy=true
+(
+  DeviceNetworkEvents
+  | where Timestamp between (StartTime .. EndTime)
+  | where DeviceName =~ Device
+  | where RemotePort in (TestPorts)
+  | where InitiatingProcessFileName in~ (Procs)
+  | project Source="MDE:DeviceNetworkEvents", Time=Timestamp, DeviceName, ActionType, Protocol, RemoteIP, RemotePort, RemoteUrl,
+            Proc=InitiatingProcessFileName, Cmd=InitiatingProcessCommandLine
+),
+(
+  DeviceProcessEvents
+  | where Timestamp between (StartTime .. EndTime)
+  | where DeviceName =~ Device
+  | where FileName in~ (Procs)
+  | project Source="MDE:DeviceProcessEvents", Time=Timestamp, DeviceName, ActionType="ProcessEvent", Protocol="", RemoteIP="", RemotePort=long(null), RemoteUrl="",
+            Proc=FileName, Cmd=CommandLine
+)
+| order by Time desc;
+
+// ======================================================
+// B) Windows Security Events (if you ingest process creation)
+// ======================================================
+
+SecurityEvent
+| where TimeGenerated between (StartTime .. EndTime)
+| where Computer has Device
+| where EventID == 4688
+| where tostring(NewProcessName) has_any (Procs) or tostring(CommandLine) has_any (Procs)
+| project Source="SecurityEvent", Time=TimeGenerated, Computer, EventID, Account, NewProcessName, CommandLine, ParentProcessName
+| order by Time desc;
+
+// ======================================================
+// C) Firewall/Network appliance logs (if ingested)
+// ======================================================
+
+CommonSecurityLog
+| where TimeGenerated between (StartTime .. EndTime)
+| where DestinationPort in (TestPorts) or SourcePort in (TestPorts)
+| project Source="CommonSecurityLog", Time=TimeGenerated, DeviceVendor, DeviceProduct, DeviceAction,
+          SourceIP, SourcePort, DestinationIP, DestinationPort, Protocol, RequestURL
+| order by Time desc;
+
+// ======================================================
+// D) AzureDiagnostics pivot (Azure Firewall / NSG / other)
+// This is a best-effort starting point; schemas vary.
+// ======================================================
+
+AzureDiagnostics
+| where TimeGenerated between (StartTime .. EndTime)
+| where tostring(msg_s) has_any (TestPorts) or tostring(rule_s) has_any (TestPorts)
+| project Source="AzureDiagnostics", Time=TimeGenerated, ResourceProvider, Category, OperationName, msg_s, rule_s, action_s
+| order by Time desc;

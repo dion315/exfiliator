@@ -1,0 +1,18 @@
+# Local configs / secrets
+pt_config*.json
+pt_psk*.txt
+
+# Reports
+*.html
+*.jsonl
+
+# Python cache / venv
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
