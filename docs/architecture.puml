@@ -1,0 +1,110 @@
+# Architecture
+
+Exfiliator is a PSK-gated, synthetic-data client/server pair used to test network egress/ingress controls and generate a human-readable HTML report.
+
+The system is intentionally simple:
+- No file-reading “exfil” behavior (synthetic random bytes only)
+- No covert channels, obfuscation, or evasion logic
+- Explicit allowlist config and explicit runtime options
+
+---
+
+## Components
+
+### 1) Client (`exfiliator_client.py`)
+Primary responsibilities:
+- Load allowlisted tests from JSON config
+- Apply run-time targeting policy:
+  - `--server` sets default host for TCP/UDP entries missing `host` (default `127.0.0.1`)
+  - `--force-server` overrides all TCP/UDP `host` values for the run
+- Apply UDP mode policy:
+  - `--allow-udp-modes` (allowlist)
+  - `--udp-mode-override` (force)
+- Execute tests:
+  - TCP: connect → send JSON header (PSK + bytes) → send payload → read JSON response
+  - UDP: HELLO (PSK + mode) → send DATA packets → optional ACK handling depending on mode
+  - HTTP: POST /upload with `X-PSK` + synthetic payload → parse response
+- User experience:
+  - Progress bars (no third-party deps)
+  - Verbose logging (-v/-vv)
+  - Press `Q` to quit gracefully and still write report
+- Output:
+  - JSON summary to stdout
+  - HTML report:
+    - Timestamped file name by default
+    - Includes client host/device info and best-effort network info
+    - Includes server arg used and target summary (supports a mix of IPs, hostnames, URLs)
+
+### 2) Server (`exfiliator_server.py`)
+Primary responsibilities:
+- Generate or load PSK (`pt_psk.txt`) on startup
+- Listen on configured ports:
+  - TCP: per-port listener threads
+  - UDP: per-port listener threads with HELLO auth
+  - HTTP: optional `POST /upload`
+- Authenticate:
+  - TCP: expects JSON header with PSK
+  - UDP: expects HELLO JSON with PSK; ignores unauthenticated DATA
+  - HTTP: expects header `X-PSK`
+- Compute minimal metrics:
+  - Counts bytes received (does not persist payload)
+  - Responds with JSON status objects
+
+### 3) Optional: Windows Firewall Helper (server-side)
+If enabled, the server can temporarily open inbound firewall ports on Windows:
+- `--manage-firewall`: creates inbound allow rules for configured TCP/UDP/HTTP ports
+- `--firewall-dry-run`: prints the exact PowerShell commands and planned rules without changing firewall
+- Cleanup:
+  - Removes only the rules created by that server instance (unique display names)
+  - Cleanup runs on normal exit and Ctrl+C (best effort)
+
+Limitations:
+- Only affects local Windows Defender Firewall on the server host
+- Does not modify upstream network ACLs/firewalls/NAT
+- May be blocked/overridden by Group Policy
+
+---
+
+## Data flows
+
+### TCP flow (high level)
+1. Client connects to `host:port`
+2. Client sends one JSON line: `{test_id, bytes, psk}`
+3. Client sends `bytes` synthetic payload
+4. Server responds with JSON `{ok, bytes_received, test_id}`
+
+### UDP flow (high level)
+1. Client sends `HELLO {test_id, psk, udp_mode, ack_every}`
+2. Server replies `HELLO_ACK` if PSK matches
+3. Client sends `DATA <seq> <payload>` packets
+4. ACK strategy depends on `udp_mode`:
+   - `reliable`: server ACKs each seq
+   - `batched_ack`: server sends ACK ranges periodically
+   - `firehose`: server sends no DATA ACKs (fastest)
+
+### HTTP flow (high level)
+1. Client POSTs synthetic payload to `/upload`
+2. Client includes headers `X-PSK` and `X-Test-Id`
+3. Server responds JSON with `{ok, bytes_received, test_id}`
+
+---
+
+## Architecture diagram (Mermaid)
+
+```mermaid
+flowchart LR
+  C[Client<br/>exfiliator_client.py] -->|TCP connect + JSON header + payload| STCP[(TCP listener(s))]
+  C -->|UDP HELLO + DATA packets| SUDP[(UDP listener(s))]
+  C -->|HTTP POST /upload + X-PSK| SHTTP[(HTTP server)]
+
+  subgraph ServerHost[Server Host<br/>exfiliator_server.py]
+    STCP
+    SUDP
+    SHTTP
+    FW[Optional: Windows Firewall Helper<br/>--manage-firewall / --firewall-dry-run]
+  end
+
+  FW -.->|Create temp inbound rules (Windows only)| ServerHost
+  FW -.->|Cleanup rules on exit| ServerHost
+
+  C --> R[HTML Report + JSON Summary]
