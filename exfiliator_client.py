@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""
+Purple-team port/protocol test client.
+
+- Tests TCP: connect, send N bytes, read JSON summary
+- Tests UDP: handshake + send datagrams with seq, wait for ACKs, report loss
+- Tests HTTP: POST synthetic bytes to /upload
+
+Requires an explicit allowlist of targets/ports in a JSON config file.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import socket
+import struct
+import time
+import urllib.request
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+
+log = logging.getLogger("pt_client")
+
+
+def setup_logging(verbosity: int) -> None:
+    level = logging.INFO if verbosity == 0 else logging.DEBUG
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(message)s")
+
+
+def rand_bytes(n: int) -> bytes:
+    return os.urandom(n)
+
+
+@dataclass
+class TcpTest:
+    host: str
+    port: int
+    bytes: int
+
+
+@dataclass
+class UdpTest:
+    host: str
+    port: int
+    payload_size: int
+    packets: int
+    inter_packet_ms: int
+    ack_timeout_ms: int
+
+
+@dataclass
+class HttpTest:
+    url: str
+    bytes: int
+
+
+def load_config(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def tcp_test(t: TcpTest, test_id: str, timeout_s: float) -> Dict[str, Any]:
+    payload = rand_bytes(t.bytes)
+    meta = {"test_id": test_id, "bytes": t.bytes}
+    header = (json.dumps(meta) + "\n").encode("utf-8")
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout_s)
+    t0 = time.time()
+    s.connect((t.host, t.port))
+    s.sendall(header)
+    s.sendall(payload)
+
+    # Read a line of JSON response
+    buf = b""
+    while not buf.endswith(b"\n"):
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+        if len(buf) > 65536:
+            break
+    s.close()
+
+    elapsed = max(1e-6, time.time() - t0)
+    sent_mbps = (t.bytes * 8) / elapsed / 1_000_000
+    resp = {}
+    try:
+        resp = json.loads(buf.decode("utf-8").strip())
+    except Exception:
+        resp = {"raw_response": buf.decode("utf-8", errors="replace")}
+
+    return {
+        "type": "tcp",
+        "host": t.host,
+        "port": t.port,
+        "bytes_sent": t.bytes,
+        "client_elapsed_s": elapsed,
+        "client_mbps": sent_mbps,
+        "server_response": resp,
+    }
+
+
+def udp_test(u: UdpTest, test_id: str, timeout_s: float) -> Dict[str, Any]:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout_s)
+
+    addr = (u.host, u.port)
+
+    # HELLO handshake
+    hello = b"HELLO " + json.dumps({"test_id": test_id}).encode("utf-8")
+    sock.sendto(hello, addr)
+    try:
+        _ = sock.recvfrom(2048)
+    except Exception:
+        pass  # not strictly required; some networks drop replies
+
+    # Send packets
+    seq_fmt = "!Q"  # uint64
+    payload = rand_bytes(max(0, u.payload_size))
+    sent = 0
+    acked = 0
+    pending = set()
+
+    t_start = time.time()
+
+    for i in range(u.packets):
+        seq = i + 1
+        pending.add(seq)
+        pkt = b"DATA " + struct.pack(seq_fmt, seq) + payload
+        sock.sendto(pkt, addr)
+        sent += 1
+        time.sleep(max(0.0, u.inter_packet_ms / 1000.0))
+
+        # Drain acks opportunistically
+        drain_until = time.time() + (u.ack_timeout_ms / 1000.0)
+        while time.time() < drain_until:
+            try:
+                data, _a = sock.recvfrom(2048)
+                if data.startswith(b"ACK ") and len(data) >= 4 + 8:
+                    ack_seq = struct.unpack(seq_fmt, data[4:12])[0]
+                    if ack_seq in pending:
+                        pending.remove(ack_seq)
+                        acked += 1
+            except socket.timeout:
+                break
+            except Exception:
+                break
+
+    # Final drain
+    final_drain_end = time.time() + (u.ack_timeout_ms / 1000.0)
+    while time.time() < final_drain_end and pending:
+        try:
+            data, _a = sock.recvfrom(2048)
+            if data.startswith(b"ACK ") and len(data) >= 4 + 8:
+                ack_seq = struct.unpack(seq_fmt, data[4:12])[0]
+                if ack_seq in pending:
+                    pending.remove(ack_seq)
+                    acked += 1
+        except Exception:
+            break
+
+    elapsed = max(1e-6, time.time() - t_start)
+    bytes_sent = u.packets * (5 + 8 + len(payload))
+    mbps = (bytes_sent * 8) / elapsed / 1_000_000
+
+    sock.close()
+
+    loss = 0 if sent == 0 else (sent - acked) / sent
+    return {
+        "type": "udp",
+        "host": u.host,
+        "port": u.port,
+        "packets_sent": sent,
+        "packets_acked": acked,
+        "loss_rate": loss,
+        "payload_size": len(payload),
+        "client_elapsed_s": elapsed,
+        "approx_mbps": mbps,
+    }
+
+
+def http_test(h: HttpTest, test_id: str, timeout_s: float) -> Dict[str, Any]:
+    payload = rand_bytes(h.bytes)
+    req = urllib.request.Request(
+        h.url,
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "X-Test-Id": test_id,
+        },
+    )
+    t0 = time.time()
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        body = resp.read()
+        status = resp.status
+    elapsed = max(1e-6, time.time() - t0)
+    mbps = (h.bytes * 8) / elapsed / 1_000_000
+    server = {}
+    try:
+        server = json.loads(body.decode("utf-8"))
+    except Exception:
+        server = {"raw_response": body.decode("utf-8", errors="replace")}
+
+    return {
+        "type": "http",
+        "url": h.url,
+        "bytes_sent": h.bytes,
+        "status": status,
+        "client_elapsed_s": elapsed,
+        "client_mbps": mbps,
+        "server_response": server,
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", required=True, help="JSON config path (explicit allowlist)")
+    ap.add_argument("--timeout", type=float, default=10.0, help="Socket/HTTP timeout seconds")
+    ap.add_argument("--test-id", default=None, help="Optional test id (otherwise timestamp-based)")
+    ap.add_argument("-v", "--verbose", action="count", default=0)
+    args = ap.parse_args()
+
+    setup_logging(args.verbose)
+
+    cfg = load_config(args.config)
+    test_id = args.test_id or f"pt-{int(time.time())}"
+
+    results: List[Dict[str, Any]] = []
+
+    # TCP tests
+    for item in cfg.get("tcp", []):
+        t = TcpTest(host=item["host"], port=int(item["port"]), bytes=int(item["bytes"]))
+        log.info("TCP test %s:%d bytes=%d", t.host, t.port, t.bytes)
+        results.append(tcp_test(t, test_id, args.timeout))
+
+    # UDP tests
+    for item in cfg.get("udp", []):
+        u = UdpTest(
+            host=item["host"],
+            port=int(item["port"]),
+            payload_size=int(item.get("payload_size", 512)),
+            packets=int(item.get("packets", 200)),
+            inter_packet_ms=int(item.get("inter_packet_ms", 5)),
+            ack_timeout_ms=int(item.get("ack_timeout_ms", 50)),
+        )
+        log.info("UDP test %s:%d payload=%d packets=%d", u.host, u.port, u.payload_size, u.packets)
+        results.append(udp_test(u, test_id, args.timeout))
+
+    # HTTP tests
+    for item in cfg.get("http", []):
+        h = HttpTest(url=item["url"], bytes=int(item["bytes"]))
+        log.info("HTTP test %s bytes=%d", h.url, h.bytes)
+        results.append(http_test(h, test_id, args.timeout))
+
+    out = {"test_id": test_id, "results": results}
+    print(json.dumps(out, indent=2))
+
+
+if __name__ == "__main__":
+    main()
