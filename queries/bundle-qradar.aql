@@ -1,0 +1,37 @@
+-- ======================================================
+-- Exfiliator - IBM QRadar (AQL)
+-- Run within Log Activity or Scheduled Searches.
+-- ======================================================
+
+SELECT
+  LOGSOURCENAME(logsourceid) AS LogSource,
+  QIDNAME(qid)               AS EventName,
+  starttime                  AS StartTime,
+  sourceip                   AS SourceIP,
+  destinationip              AS DestinationIP,
+  destinationport            AS DestinationPort,
+  username                   AS Username,
+  CATEGORYNAME(highlevelcategory) AS HighLevelCategory,
+  CATEGORYNAME(magnitude)    AS Severity,
+  "ProcessName"              AS ProcessName,
+  URL                        AS URL
+FROM events
+WHERE starttime >= NOW - 1 DAY
+  AND (destinationport IN (5001,5002,8080,8443)
+       OR UTF8(payload) LIKE '%/upload%'
+       OR (LOWER("ProcessName") LIKE '%python%' OR UTF8(payload) LIKE '%python%'))
+ORDER BY starttime DESC
+LAST 1 DAYS;
+
+-- DNS lookups with PSK labels
+SELECT
+  starttime,
+  sourceip,
+  destinationip,
+  UTF8(payload) AS Payload
+FROM events
+WHERE starttime >= NOW - 1 DAY
+  AND CATEGORYNAME(lowlevelcategory) ILIKE '%dns%'
+  AND UTF8(payload) ILIKE '%psk-%'
+ORDER BY starttime DESC
+LAST 1 DAYS;

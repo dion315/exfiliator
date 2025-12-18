@@ -1,6 +1,6 @@
 # Threat Model
 
-Exfiliator is a **purple-team network control testing tool** that generates **synthetic traffic** (TCP/UDP/HTTP) and produces a timestamped HTML report.
+Exfiliator is a **purple-team network control testing tool** that generates **synthetic traffic** (TCP/UDP/HTTP/DNS/Telnet/SMTP) and produces a timestamped HTML report.
 
 **Design intent:** validate network controls and telemetry safely using explicit allowlists and a PSK.
 **Non-goals:** covert channels, evasion, persistence, privilege escalation, or data theft.
@@ -10,7 +10,7 @@ Exfiliator is a **purple-team network control testing tool** that generates **sy
 ## Scope
 
 ### In scope
-- Client/server traffic generation for TCP/UDP/HTTP
+- Client/server traffic generation for TCP/UDP/HTTP/DNS/Telnet/SMTP
 - Authentication/authorization via **pre-shared key (PSK)**
 - Run controls:
   - `--server` default host for TCP/UDP entries missing `host` (default `127.0.0.1`)
@@ -34,7 +34,7 @@ Exfiliator is a **purple-team network control testing tool** that generates **sy
 
 ## Assets
 
-- **PSK (`pt_psk.txt`)**: shared secret gating use of server endpoints
+- **PSK**: shared secret gating use of server endpoints (generated each run unless explicitly provided)
 - **HTML reports / JSON output**: may contain environment identifiers (hostnames, IPs, command outputs if enabled)
 - **Server firewall state** (Windows helper): temporary inbound rules may expand exposure if misconfigured
 
@@ -126,9 +126,12 @@ These mappings are for **coverage/telemetry validation**. Exfiliator is not inte
 
 | Test/Behavior | Validates | ATT&CK technique (example) |
 |---|---|---|
-| TCP synthetic upload to arbitrary port | Egress filtering, IDS/IPS/flow logs, proxy/firewall behavior | Application Layer Protocol (context-dependent), Exfiltration Over Alternative Protocol (context-dependent) |
+| TCP synthetic upload to arbitrary port | Egress filtering, IDS/IPS/flow logs, proxy/firewall behavior | Application Layer Protocol, Exfiltration Over Alternative Protocol (TCP) |
 | UDP synthetic packets (`reliable/batched/firehose`) | UDP egress controls, drops vs rejects, flow logs, IDS alerts | Exfiltration Over Alternative Protocol (UDP) |
-| HTTP POST to `/upload` | Web proxy controls, URL filtering, HTTP telemetry | Exfiltration Over Web Service / Application Layer Protocol (HTTP) |
+| HTTP POST `/upload` + optional `/download` | Web proxy controls, URL filtering, HTTP telemetry, inbound restrictions | Exfiltration Over Web Service / Application Layer Protocol (HTTP) |
+| DNS queries embedding PSK/mock labels | DNS egress controls, RPZ/filtering, DLP tuned to DNS labels | Exfiltration Over Unencrypted/Obfuscated Non-C2 Protocol, DNS |
+| Telnet “looks like” traffic with mock payload | Legacy/OT protocol monitoring, NAC policy coverage, proxy alerts | Application Layer Protocol (Telnet), Exfiltration Over Unencrypted/Obfuscated Channel |
+| SMTP AUTH + DATA uploads | Email egress monitoring, DLP policy, MTA controls | Exfiltration Over Unencrypted/Obfuscated Channel / Application Layer Protocol (SMTP) |
 
 > Choose the specific ATT&CK technique labels used by your org’s mapping standard; many teams map these at a higher level (“Exfiltration Over Alternative Protocol” / “Application Layer Protocol”) depending on fidelity.
 
@@ -137,7 +140,7 @@ These mappings are for **coverage/telemetry validation**. Exfiliator is not inte
 ## Operational guardrails
 
 - Use only **synthetic data** (no file reads)
-- Keep PSK secure; rotate and do not commit `pt_psk.txt`
+- Keep PSK secure; rotate frequently and avoid persisting it unless necessary
 - Prefer constrained listener binding and firewall remote scope
 - Store/share reports appropriately; avoid committing reports
 - Use firewall dry-run for review/change control when needed

@@ -1,0 +1,85 @@
+{
+  "tcp": [
+    {
+      "host": "10.10.20.15",
+      "port": 5001,
+      "bytes": 2097152
+    },
+    {
+      "host": "10.10.20.16",
+      "port": 8443,
+      "bytes": 3145728
+    }
+  ],
+  "udp": [
+    {
+      "host": "10.10.20.15",
+      "port": 5002,
+      "udp_mode": "reliable",
+      "packets": 400,
+      "payload_size": 256,
+      "inter_packet_ms": 5,
+      "ack_timeout_ms": 250,
+      "ack_every": 1,
+      "batch_size": 1
+    },
+    {
+      "host": "10.10.20.16",
+      "port": 6001,
+      "udp_mode": "batched_ack",
+      "packets": 600,
+      "payload_size": 512,
+      "inter_packet_ms": 2,
+      "ack_timeout_ms": 200,
+      "ack_every": 25,
+      "batch_size": 25
+    },
+    {
+      "host": "10.10.20.16",
+      "port": 6002,
+      "udp_mode": "firehose",
+      "packets": 800,
+      "payload_size": 128,
+      "inter_packet_ms": 0,
+      "ack_timeout_ms": 100,
+      "ack_every": 50,
+      "batch_size": 100
+    }
+  ],
+  "http": [
+    {
+      "url": "http://telemetry.lab.example/upload",
+      "bytes": 1048576
+    }
+  ],
+  "dns": [
+    {
+      "host": "10.10.20.18",
+      "port": 5053,
+      "qname": "telemetry.lab.example",
+      "qtype": "TXT"
+    }
+  ],
+  "telnet": [
+    {
+      "host": "10.10.20.15",
+      "port": 2300,
+      "username": "ops",
+      "password": "hybridlab",
+      "commands": [
+        "show version",
+        "show interfaces summary"
+      ]
+    }
+  ],
+  "smtp": [
+    {
+      "host": "10.10.20.16",
+      "port": 2525,
+      "mail_from": "alerts@lab.example",
+      "rcpt_to": "detections@lab.example",
+      "subject": "Hybrid lab telemetry test",
+      "body": "Synthetic data egress check for hybrid lab enclave."
+    }
+  ]
+}

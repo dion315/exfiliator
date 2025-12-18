@@ -1,0 +1,33 @@
+// ======================================================
+// Exfiliator - Wazuh (Elastic Stack) ES|QL
+// Works against the default wazuh-alerts-* indices.
+// ======================================================
+
+// ---------- PARAMETERS ----------
+FROM wazuh-alerts-*
+| WHERE @timestamp BETWEEN NOW() - 24h AND NOW()
+| WHERE (event.dataset == "network" OR rule.groups LIKE "%network%")
+| WHERE destination.port IN (5001, 5002, 8080, 8443)
+| STATS events = COUNT(*),
+         first_seen = MIN(@timestamp),
+         last_seen = MAX(@timestamp),
+         hosts = VALUES(host.name),
+         src_ips = VALUES(source.ip),
+         dest_ips = VALUES(destination.ip),
+         sample_alert = ANY(message)
+| SORT last_seen DESC;
+
+// ---------- DNS PSK lookups ----------
+FROM wazuh-alerts-*
+| WHERE @timestamp BETWEEN NOW() - 24h AND NOW()
+| WHERE event.module == "dns" OR rule.groups LIKE "%dns%"
+| WHERE query.name LIKE "*psk-*"
+| KEEP @timestamp, host.name, source.ip, destination.ip, query.name, dns.response_code;
+
+// ---------- Process creation (Sysmon / auditd forwarded to Wazuh) ----------
+FROM wazuh-alerts-*
+| WHERE @timestamp BETWEEN NOW() - 24h AND NOW()
+| WHERE event.category == "process"
+| WHERE process.name LIKE "python%" OR process.command_line LIKE "*python*"
+| KEEP @timestamp, host.name, user.name, process.pid, process.parent.pid, process.command_line
+| SORT @timestamp DESC;

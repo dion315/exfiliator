@@ -1,0 +1,61 @@
+{
+  "tcp": [
+    {
+      "port": 5001,
+      "bytes": 1048576
+    },
+    {
+      "host": "127.0.0.1",
+      "port": 8443,
+      "bytes": 524288
+    }
+  ],
+  "udp": [
+    {
+      "port": 5002,
+      "udp_mode": "reliable",
+      "packets": 200,
+      "payload_size": 512,
+      "inter_packet_ms": 0,
+      "ack_timeout_ms": 200,
+      "ack_every": 1,
+      "batch_size": 1
+    }
+  ],
+  "http": [
+    {
+      "url": "http://127.0.0.1:8080/upload",
+      "bytes": 131072
+    }
+  ],
+  "dns": [
+    {
+      "host": "127.0.0.1",
+      "port": 5353,
+      "qname": "internal.lab",
+      "qtype": "A"
+    }
+  ],
+  "telnet": [
+    {
+      "host": "127.0.0.1",
+      "port": 2323,
+      "username": "labuser",
+      "password": "labpass",
+      "commands": [
+        "whoami",
+        "uname -a"
+      ]
+    }
+  ],
+  "smtp": [
+    {
+      "host": "127.0.0.1",
+      "port": 2525,
+      "mail_from": "alerts@example.com",
+      "rcpt_to": "ops@example.com",
+      "subject": "Local smoke test",
+      "body": "Synthetic SMTP payload from Exfiliator."
+    }
+  ]
+}

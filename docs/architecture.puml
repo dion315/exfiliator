@@ -15,15 +15,21 @@ The system is intentionally simple:
 Primary responsibilities:
 - Load allowlisted tests from JSON config
 - Apply run-time targeting policy:
-  - `--server` sets default host for TCP/UDP entries missing `host` (default `127.0.0.1`)
-  - `--force-server` overrides all TCP/UDP `host` values for the run
+  - `--server` sets default host for TCP/UDP/Telnet/SMTP entries missing `host` (default `127.0.0.1`)
+  - `--force-server` overrides all TCP/UDP/Telnet/SMTP `host` values for the run
 - Apply UDP mode policy:
   - `--allow-udp-modes` (allowlist)
   - `--udp-mode-override` (force)
 - Execute tests:
   - TCP: connect → send JSON header (PSK + bytes) → send payload → read JSON response
   - UDP: HELLO (PSK + mode) → send DATA packets → optional ACK handling depending on mode
-  - HTTP: POST /upload with `X-PSK` + synthetic payload → parse response
+  - HTTP: POST /upload with `X-PSK` + synthetic payload → parse response (+ optional `/download` validation)
+  - DNS: craft PSK-tagged queries to test DNS egress + mock-sensitive labels
+  - Telnet: emulate banner/login/password + PSK prompt, run scripted commands
+  - SMTP: issue `EHLO`, custom `AUTH PSK`, and send DATA payloads
+- Mock-sensitive workflow:
+  - Replays successful TCP/UDP/HTTP/DNS/Telnet/SMTP channels
+  - Sends base + obfuscated payloads; HTTP also attempts `/download`
 - User experience:
   - Progress bars (no third-party deps)
   - Verbose logging (-v/-vv)
@@ -37,22 +43,28 @@ Primary responsibilities:
 
 ### 2) Server (`exfiliator_server.py`)
 Primary responsibilities:
-- Generate or load PSK (`pt_psk.txt`) on startup
+- Generate a PSK each run (or load via `--psk` / `--psk-file`)
 - Listen on configured ports:
   - TCP: per-port listener threads
   - UDP: per-port listener threads with HELLO auth
-  - HTTP: optional `POST /upload`
+  - HTTP: optional `POST /upload` and `GET /download`
+  - DNS: PSK-gated UDP responders
+  - Telnet: shell façade with PSK prompt
+  - SMTP: AUTH PSK + DATA handler
 - Authenticate:
   - TCP: expects JSON header with PSK
   - UDP: expects HELLO JSON with PSK; ignores unauthenticated DATA
   - HTTP: expects header `X-PSK`
+  - DNS: `psk-` label must match active PSK
+  - Telnet: PSK prompt prior to command execution
+  - SMTP: `AUTH PSK <value>`
 - Compute minimal metrics:
   - Counts bytes received (does not persist payload)
-  - Responds with JSON status objects
+  - Responds with JSON status objects or command echoes
 
 ### 3) Optional: Windows Firewall Helper (server-side)
 If enabled, the server can temporarily open inbound firewall ports on Windows:
-- `--manage-firewall`: creates inbound allow rules for configured TCP/UDP/HTTP ports
+- `--manage-firewall`: creates inbound allow rules for configured TCP/UDP/HTTP/DNS/Telnet/SMTP ports
 - `--firewall-dry-run`: prints the exact PowerShell commands and planned rules without changing firewall
 - Cleanup:
   - Removes only the rules created by that server instance (unique display names)
@@ -86,6 +98,23 @@ Limitations:
 1. Client POSTs synthetic payload to `/upload`
 2. Client includes headers `X-PSK` and `X-Test-Id`
 3. Server responds JSON with `{ok, bytes_received, test_id}`
+4. Optional `GET /download` validates inbound controls when enabled
+
+### DNS flow (high level)
+1. Client constructs `<test>-<psk>.base_qname`
+2. Server validates PSK label, responds with synthetic record
+3. Mock-sensitive mode replays payload fragments/obfuscated labels
+
+### Telnet flow (high level)
+1. Client receives banner, submits username/password + PSK
+2. Scripted commands execute; mock-sensitive mode sends `DATA`/`OBF` lines
+3. Server echoes results until `EXIT`
+
+### SMTP flow (high level)
+1. Client issues `EHLO` and `AUTH PSK`
+2. Sends `MAIL FROM` / `RCPT TO`
+3. Sends DATA payloads (base + mock-sensitive/obfuscated)
+4. Server replies `250`, client `QUIT`s
 
 ---
 
@@ -96,11 +125,17 @@ flowchart LR
   C[Client<br/>exfiliator_client.py] -->|TCP connect + JSON header + payload| STCP[(TCP listener(s))]
   C -->|UDP HELLO + DATA packets| SUDP[(UDP listener(s))]
   C -->|HTTP POST /upload + X-PSK| SHTTP[(HTTP server)]
+  C -->|DNS query with PSK label| SDNS[(DNS responder)]
+  C -->|Telnet banner + commands| STEL[(Telnet emulator)]
+  C -->|SMTP AUTH PSK + DATA| SSMTP[(SMTP emulator)]
 
   subgraph ServerHost[Server Host<br/>exfiliator_server.py]
     STCP
     SUDP
     SHTTP
+    SDNS
+    STEL
+    SSMTP
     FW[Optional: Windows Firewall Helper<br/>--manage-firewall / --firewall-dry-run]
   end
 
