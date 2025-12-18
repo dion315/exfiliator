@@ -16,3 +16,7 @@ venv/
 .vscode/
 .idea/
 .DS_Store
+
+# Exfiliator generated secrets/reports
+pt_psk.txt
+exfiliator_report*.html
