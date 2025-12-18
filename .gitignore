@@ -20,3 +20,7 @@ venv/
 # Exfiliator generated secrets/reports
 pt_psk.txt
 exfiliator_report*.html
+
+# Generated secrets and reports
+pt_psk.txt
+exfiliator_report*.html
