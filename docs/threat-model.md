@@ -55,8 +55,10 @@ Exfiliator is a **purple-team network control testing tool** that generates **sy
 **Threat:** A third party uses the server as a transfer endpoint.
 
 **Mitigations:**
-- PSK required for TCP/UDP/HTTP
+- PSK required for every protocol (TCP/UDP/HTTP/DNS/Telnet/SMTP)
 - UDP ignores unauthenticated DATA (must pass HELLO with PSK)
+- DNS rejects queries whose labels do not contain the current PSK
+- Telnet/SMTP handlers refuse to proceed until PSK step succeeds
 - Operational guardrails:
   - bind to limited interfaces where possible
   - restrict firewall scope (default `LocalSubnet`)
