@@ -11,8 +11,6 @@ Intended for **authorized purple-team testing** in controlled environments.
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-> Adjust these to match your internal standards if needed.
-
 ---
 
 ## What it does
